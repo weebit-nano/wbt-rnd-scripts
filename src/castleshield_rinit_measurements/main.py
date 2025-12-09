@@ -13,7 +13,7 @@ DATA_PATH = r"C:/Users/MarcDrouard/Weebit Nano/Weebit Nano RnD Data - Documents/
 Y_NAME = "Resistance(Ohm)"
 
 # Voltages [V]
-V_RANGE = np.linspace(25e-3, 175e-3, 7)
+V_RANGE_STR = ["0.025", "0.05", "0.075", "0.1", "0.125", "0.15", "0.175", "0.2"]
 
 # Currents as strings used in folder names / column names
 I_RANGE_STR = ["100n", "1u", "10u"]
@@ -92,8 +92,8 @@ def compute_effective_resistance(df, v):
     R_1uA   = df["R_1uA"].copy()
     R_10uA  = df["R_10uA"].copy()
 
-    thresh_100n = v / I_VALUES["100n"]  # v / 100nA
-    thresh_1u   = v / I_VALUES["1u"]    # v / 1uA
+    thresh_100n = float(v) / I_VALUES["100n"]  # v / 100nA
+    thresh_1u   = float(v) / I_VALUES["1u"]    # v / 1uA
 
     # Start with 10uA everywhere
     R_eff = R_10uA.copy()
@@ -124,7 +124,7 @@ def fit_log_logistic(sorted_R, emp_cdf, v):
     If not enough points, returns (None, None, None, None, None).
     """
     # Fit window
-    xmax_fit = v * XMAX_FIT_FACTOR
+    xmax_fit = float(v) * XMAX_FIT_FACTOR
 
     mask = ((sorted_R >= XMIN_FIT) &
             (sorted_R <= xmax_fit) &
@@ -171,7 +171,7 @@ loglogistic_params = {}
 fig, ax = plt.subplots(1, 2, figsize=(12, 6))
 ax = ax.flatten()
 
-for v in V_RANGE:
+for v in V_RANGE_STR:
     # 1) Load raw R columns for this voltage
     df = load_resistance_columns_for_voltage(v)
 
@@ -185,7 +185,7 @@ for v in V_RANGE:
     emp_cdf = np.arange(1, len(sorted_R) + 1) / len(sorted_R)
 
     # Cut tail where R < v * R_CUT_FACTOR
-    tail_limit = v * R_CUT_FACTOR
+    tail_limit = float(v) * R_CUT_FACTOR
     n_tail = np.sum(sorted_R < tail_limit)
 
     # Plot empirical CDF and capture color
@@ -195,7 +195,7 @@ for v in V_RANGE:
         ls="",
         marker="o",
         markersize=3,
-        label=f"{v*1000:.0f} mV",
+        label=f"{float(v)*1000:.0f} mV",
     )
     color = line_data.get_color()
 
@@ -210,7 +210,7 @@ for v in V_RANGE:
     R_grid, cdf_fit = fit_result
 
     print(
-        f"V = {v:.3f} V: logistic fit a={a:.3f}, b={b:.3f}, "
+        f"V = {float(v):.3f} V: logistic fit a={a:.3f}, b={b:.3f}, "
         f"log-logistic alpha={alpha:.3f}, lambda={lam:.3e}"
     )
 
@@ -221,7 +221,7 @@ for v in V_RANGE:
         cdf_fit,
         linestyle="-",
         color=color,
-        label=f"{v*1000:.0f} mV",
+        label=f"{float(v)*1000:.0f} mV",
     )
 
 # =========================
@@ -248,6 +248,37 @@ ax[1].set_ylabel("CDF")
 ax[1].grid(True, which="both", ls = '--', color = 'lightgray')
 ax[1].legend(fontsize=8, ncol=2)
 ax[1].set_title("Log-logistic fit")
+
+plt.tight_layout()
+plt.show()
+
+# =========================================
+# PLOT alpha(v) and lambda(v)
+# =========================================
+
+# Convert voltage strings to float (in volts and in mV)
+V_float = np.array([float(v) for v in loglogistic_params.keys()])
+V_mV = V_float * 1000  # nicer for plotting
+
+alpha_vals = np.array([loglogistic_params[v][2] for v in loglogistic_params.keys()])
+lambda_vals = np.array([loglogistic_params[v][3] for v in loglogistic_params.keys()])
+
+fig2, ax2 = plt.subplots(1, 2, figsize=(12, 5))
+
+# ---- alpha vs voltage ----
+ax2[0].plot(V_mV, alpha_vals, "o-", linewidth=2)
+ax2[0].set_xlabel("Voltage (mV)")
+ax2[0].set_ylabel("Alpha (shape)")
+ax2[0].set_title("Log-logistic shape parameter α vs voltage")
+ax2[0].grid(True, ls='--', color='lightgray')
+
+# ---- lambda vs voltage ----
+ax2[1].plot(V_mV, lambda_vals, "o-", linewidth=2)
+ax2[1].set_xlabel("Voltage (mV)")
+ax2[1].set_ylabel("Lambda (scale)")
+ax2[1].set_title("Log-logistic scale parameter λ vs voltage")
+ax2[1].set_yscale("log")  # usually λ spans orders of magnitude
+ax2[1].grid(True, ls='--', color='lightgray')
 
 plt.tight_layout()
 plt.show()
