@@ -1,0 +1,24 @@
+[project]
+name = "old-mad-data-migration"
+version = "0.1.0"
+description = "Old MAD data migration utilities"
+requires-python = ">=3.10"
+dependencies = [
+    "tqdm>=4.66.0",
+]
+
+[project.scripts]
+ttk2json-batch = "src.ttk2json_batch:main"
+move-ok-to-clean = "src.move_ok_to_clean:main"
+zip-clean-mad-data = "src.zip_clean_mad_data:main"
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "."
+module-name = "src"

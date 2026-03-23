@@ -1,0 +1,25 @@
+[project]
+name = "castleshield-rinit-measurements"
+version = "0.1.0"
+description = "Castleshield Rinit measurements analysis tools"
+requires-python = ">=3.10"
+dependencies = [
+    "addcopyfighandler",
+    "matplotlib>=3.10.7",
+    "numpy>=1.26",
+    "pandas>=2.3.3",
+]
+
+[project.scripts]
+castleshield_rinit_measurements = "src.main:main"
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "."
+module-name = "src"

@@ -1,9 +1,9 @@
 import os
 
-import addcopyfighandler
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+import addcopyfighandler
 
 # =========================
 # CONFIGURATION
@@ -164,121 +164,125 @@ def fit_log_logistic(sorted_R, emp_cdf, v):
 # =========================
 # MAIN SCRIPT
 # =========================
+def main():
+    dfs_per_V = {}
+    loglogistic_params = {}
 
-dfs_per_V = {}
-loglogistic_params = {}
+    fig, ax = plt.subplots(1, 2, figsize=(12, 6))
+    ax = ax.flatten()
 
-fig, ax = plt.subplots(1, 2, figsize=(12, 6))
-ax = ax.flatten()
+    for v in V_RANGE_STR:
+        # 1) Load raw R columns for this voltage
+        df = load_resistance_columns_for_voltage(v)
 
-for v in V_RANGE_STR:
-    # 1) Load raw R columns for this voltage
-    df = load_resistance_columns_for_voltage(v)
+        # 2) Compute effective R and selected current based on thresholds
+        df = compute_effective_resistance(df, v)
+        dfs_per_V[v] = df
 
-    # 2) Compute effective R and selected current based on thresholds
-    df = compute_effective_resistance(df, v)
-    dfs_per_V[v] = df
+        # 3) Empirical CDF
+        R_values = df["R"].dropna().values
+        sorted_R = np.sort(R_values)
+        emp_cdf = np.arange(1, len(sorted_R) + 1) / len(sorted_R)
 
-    # 3) Empirical CDF
-    R_values = df["R"].dropna().values
-    sorted_R = np.sort(R_values)
-    emp_cdf = np.arange(1, len(sorted_R) + 1) / len(sorted_R)
+        # Cut tail where R < v * R_CUT_FACTOR
+        tail_limit = float(v) * R_CUT_FACTOR
+        n_tail = np.sum(sorted_R < tail_limit)
 
-    # Cut tail where R < v * R_CUT_FACTOR
-    tail_limit = float(v) * R_CUT_FACTOR
-    n_tail = np.sum(sorted_R < tail_limit)
+        # Plot empirical CDF and capture color
+        (line_data,) = ax[0].plot(
+            sorted_R[:n_tail],
+            emp_cdf[:n_tail],
+            ls="",
+            marker="o",
+            markersize=3,
+            label=f"{float(v)*1000:.0f} mV",
+        )
+        color = line_data.get_color()
 
-    # Plot empirical CDF and capture color
-    (line_data,) = ax[0].plot(
-        sorted_R[:n_tail],
-        emp_cdf[:n_tail],
-        ls="",
-        marker="o",
-        markersize=3,
-        label=f"{float(v)*1000:.0f} mV",
-    )
-    color = line_data.get_color()
+        # 4) Fit log-logistic in log(R)
+        a, b, alpha, lam, fit_result = fit_log_logistic(sorted_R, emp_cdf, v)
 
-    # 4) Fit log-logistic in log(R)
-    a, b, alpha, lam, fit_result = fit_log_logistic(sorted_R, emp_cdf, v)
+        if fit_result is None:
+            print(f"V = {v:.3f} V: not enough points in logistic fit region")
+            continue
 
-    if fit_result is None:
-        print(f"V = {v:.3f} V: not enough points in logistic fit region")
-        continue
+        loglogistic_params[v] = (a, b, alpha, lam)
+        R_grid, cdf_fit = fit_result
 
-    loglogistic_params[v] = (a, b, alpha, lam)
-    R_grid, cdf_fit = fit_result
+        print(
+            f"V = {float(v):.3f} V: logistic fit a={a:.3f}, b={b:.3f}, "
+            f"log-logistic alpha={alpha:.3f}, lambda={lam:.3e}"
+        )
 
-    print(
-        f"V = {float(v):.3f} V: logistic fit a={a:.3f}, b={b:.3f}, "
-        f"log-logistic alpha={alpha:.3f}, lambda={lam:.3e}"
-    )
+        # Plot fit on both panels
+        ax[0].plot(R_grid, cdf_fit, linestyle=":", color=color)
+        ax[1].plot(
+            R_grid,
+            cdf_fit,
+            linestyle="-",
+            color=color,
+            label=f"{float(v)*1000:.0f} mV",
+        )
 
-    # Plot fit on both panels
-    ax[0].plot(R_grid, cdf_fit, linestyle=":", color=color)
-    ax[1].plot(
-        R_grid,
-        cdf_fit,
-        linestyle="-",
-        color=color,
-        label=f"{float(v)*1000:.0f} mV",
-    )
+    # =========================
+    # PLOT STYLING
+    # =========================
 
-# =========================
-# PLOT STYLING
-# =========================
+    # Left: empirical CDF + fits
+    ax[0].set_xscale("log")
+    ax[0].set_yscale("log")
+    ax[0].set_xlim([XMIN_PLOT, XMAX_PLOT])
+    ax[0].set_ylim([1e-3, 1])
+    ax[0].set_xlabel("Resistance (Ohm)")
+    ax[0].set_ylabel("CDF")
+    ax[0].grid(True, which="both", ls = '--', color = 'lightgray')
+    ax[0].legend(fontsize=8, ncol=2)
+    ax[0].set_title("Empirical CDF and log-logistic fit")
 
-# Left: empirical CDF + fits
-ax[0].set_xscale("log")
-ax[0].set_yscale("log")
-ax[0].set_xlim([XMIN_PLOT, XMAX_PLOT])
-ax[0].set_ylim([1e-3, 1])
-ax[0].set_xlabel("Resistance (Ohm)")
-ax[0].set_ylabel("CDF")
-ax[0].grid(True, which="both", ls = '--', color = 'lightgray')
-ax[0].legend(fontsize=8, ncol=2)
-ax[0].set_title("Empirical CDF and log-logistic fit")
+    # Right: fits only
+    ax[1].set_xscale("log")
+    ax[1].set_xlim([XMIN_PLOT, XMAX_PLOT_FIT_ONLY])
+    ax[1].set_ylim([1e-3, 1])
+    ax[1].set_xlabel("Resistance (Ohm)")
+    ax[1].set_ylabel("CDF")
+    ax[1].grid(True, which="both", ls = '--', color = 'lightgray')
+    ax[1].legend(fontsize=8, ncol=2)
+    ax[1].set_title("Log-logistic fit")
 
-# Right: fits only
-ax[1].set_xscale("log")
-ax[1].set_xlim([XMIN_PLOT, XMAX_PLOT_FIT_ONLY])
-ax[1].set_ylim([1e-3, 1])
-ax[1].set_xlabel("Resistance (Ohm)")
-ax[1].set_ylabel("CDF")
-ax[1].grid(True, which="both", ls = '--', color = 'lightgray')
-ax[1].legend(fontsize=8, ncol=2)
-ax[1].set_title("Log-logistic fit")
+    plt.tight_layout()
+    plt.show()
 
-plt.tight_layout()
-plt.show()
+    # =========================================
+    # PLOT alpha(v) and lambda(v)
+    # =========================================
 
-# =========================================
-# PLOT alpha(v) and lambda(v)
-# =========================================
+    # Convert voltage strings to float (in volts and in mV)
+    V_float = np.array([float(v) for v in loglogistic_params.keys()])
+    V_mV = V_float * 1000  # nicer for plotting
 
-# Convert voltage strings to float (in volts and in mV)
-V_float = np.array([float(v) for v in loglogistic_params.keys()])
-V_mV = V_float * 1000  # nicer for plotting
+    alpha_vals = np.array([loglogistic_params[v][2] for v in loglogistic_params.keys()])
+    lambda_vals = np.array([loglogistic_params[v][3] for v in loglogistic_params.keys()])
 
-alpha_vals = np.array([loglogistic_params[v][2] for v in loglogistic_params.keys()])
-lambda_vals = np.array([loglogistic_params[v][3] for v in loglogistic_params.keys()])
+    fig2, ax2 = plt.subplots(1, 2, figsize=(12, 5))
 
-fig2, ax2 = plt.subplots(1, 2, figsize=(12, 5))
+    # ---- alpha vs voltage ----
+    ax2[0].plot(V_mV, alpha_vals, "o-", linewidth=2)
+    ax2[0].set_xlabel("Voltage (mV)")
+    ax2[0].set_ylabel("Alpha (shape)")
+    ax2[0].set_title("Log-logistic shape parameter α vs voltage")
+    ax2[0].grid(True, ls='--', color='lightgray')
 
-# ---- alpha vs voltage ----
-ax2[0].plot(V_mV, alpha_vals, "o-", linewidth=2)
-ax2[0].set_xlabel("Voltage (mV)")
-ax2[0].set_ylabel("Alpha (shape)")
-ax2[0].set_title("Log-logistic shape parameter α vs voltage")
-ax2[0].grid(True, ls='--', color='lightgray')
+    # ---- lambda vs voltage ----
+    ax2[1].plot(V_mV, lambda_vals, "o-", linewidth=2)
+    ax2[1].set_xlabel("Voltage (mV)")
+    ax2[1].set_ylabel("Lambda (scale)")
+    ax2[1].set_title("Log-logistic scale parameter λ vs voltage")
+    ax2[1].set_yscale("log")  # usually λ spans orders of magnitude
+    ax2[1].grid(True, ls='--', color='lightgray')
 
-# ---- lambda vs voltage ----
-ax2[1].plot(V_mV, lambda_vals, "o-", linewidth=2)
-ax2[1].set_xlabel("Voltage (mV)")
-ax2[1].set_ylabel("Lambda (scale)")
-ax2[1].set_title("Log-logistic scale parameter λ vs voltage")
-ax2[1].set_yscale("log")  # usually λ spans orders of magnitude
-ax2[1].grid(True, ls='--', color='lightgray')
+    plt.tight_layout()
+    plt.show()
 
-plt.tight_layout()
-plt.show()
+if __name__ == "__main__":
+    addcopyfighandler.add_copy_fig_handler()
+    main()

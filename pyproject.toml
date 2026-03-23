@@ -1,10 +1,15 @@
 [project]
 name = "wbt-rnd-scripts"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
+description = "Shared workspace entrypoints for Weebit R&D scripts"
 requires-python = ">=3.10"
-dependencies = [
-    "matplotlib>=3.10.7",
-    "pandas>=2.3.3",
-]
+
+[tool.uv.workspace]
+members = ["workspaces/*"]
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
