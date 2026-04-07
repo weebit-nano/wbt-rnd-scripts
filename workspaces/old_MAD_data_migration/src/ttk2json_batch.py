@@ -643,11 +643,16 @@ def main(argv: list[str] | None = None) -> int:
             seen_dirs.add(directory_value)
             directory_list.append(directory_value)
 
-    def write_summary_log() -> tuple[bool, str | None, Path]:
+    def write_summary_log(status: str) -> tuple[bool, str | None, Path]:
         summary_path = base_dir / "run_log.json"
         payload: dict[str, object] = {
             "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "status": status,
             "base_dir": str(base_dir),
+            "selected_count": len(selected),
+            "completed_count": len(ok_parent_dirs) + len(failed_parent_dirs),
+            "converted_count": len(ok_parent_dirs),
+            "failed_count": len(failed_parent_dirs),
             "selected_counts": {
                 "ok_parent_dirs": len(ok_parent_dirs),
                 "failed_parent_dirs": len(failed_parent_dirs),
@@ -661,13 +666,19 @@ def main(argv: list[str] | None = None) -> int:
         return ok, error, summary_path
 
     if not selected:
-        json_ok, json_error, json_path = write_summary_log()
+        json_ok, json_error, json_path = write_summary_log("complete")
         if json_ok:
             print(f"[LOG] Wrote run summary to {json_path}")
         else:
             print(f"[WARN] {json_error}")
         print("[INFO] Nothing to convert.")
         return 0
+
+    json_ok, json_error, json_path = write_summary_log("running")
+    if json_ok:
+        print(f"[LOG] Writing live run summary to {json_path}")
+    else:
+        print(f"[WARN] {json_error}")
 
     failures = 0
     converted = 0
@@ -701,7 +712,11 @@ def main(argv: list[str] | None = None) -> int:
                         pending_future.cancel()
                 break
 
-    json_ok, json_error, json_path = write_summary_log()
+            json_ok, json_error, json_path = write_summary_log("running")
+            if not json_ok:
+                print(f"[WARN] {json_error}")
+
+    json_ok, json_error, json_path = write_summary_log("complete")
 
     print("\n[SUMMARY]")
     print(f"  Converted successfully: {converted}")
