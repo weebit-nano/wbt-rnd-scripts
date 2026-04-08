@@ -1,12 +1,12 @@
-"""Move successful batch-conversion folders into CLEAN while preserving hierarchy.
+"""Transfer successful batch-conversion folders into CLEAN while preserving hierarchy.
 
 The script reads the `run_log.json` summary written by `ttk2json_batch.py`,
 selects the parent directories listed under `selected_parent_dirs.OK`, and
-moves those directories from `--base-dir` into `--clean-dir`, retaining the
-same relative path structure.
+transfers those directories from `--base-dir` into `--clean-dir`, retaining
+the same relative path structure.
 
 The `--roots` argument matches the batch processor's interface so you can
-limit the move to the same top-level roots if desired.
+limit the transfer to the same top-level roots if desired.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from pathlib import Path
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Move OK batch-conversion folders into CLEAN while preserving "
+            "Transfer OK batch-conversion folders into CLEAN while preserving "
             "the relative hierarchy."
         )
     )
@@ -35,7 +35,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--clean-dir",
         type=Path,
         default=Path("CLEAN"),
-        help="Destination root for moved directories (default: CLEAN under --base-dir).",
+        help="Destination root for transferred directories (default: CLEAN under --base-dir).",
     )
     parser.add_argument(
         "--summary-json",
@@ -52,19 +52,48 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show what would be moved without changing anything.",
+        help="Show what would be transferred without changing anything.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("move", "copy"),
+        default="move",
+        help="Transfer mode: move directories out of --base-dir or copy them into --clean-dir (default: move).",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Move even if the destination already exists by skipping that entry silently.",
+        help="Treat an existing destination as already processed and skip that entry silently.",
     )
     return parser.parse_args(argv)
 
 
 def load_summary(summary_path: Path) -> dict[str, object]:
     with summary_path.open("r", encoding="utf-8") as summary_file:
-        return json.load(summary_file)
+        loaded = json.load(summary_file)
+
+    if isinstance(loaded, dict):
+        if isinstance(loaded.get("selected_parent_dirs"), dict):
+            return loaded
+
+        latest = loaded.get("latest")
+        if isinstance(latest, dict):
+            return latest
+
+        runs = loaded.get("runs")
+        if isinstance(runs, list):
+            for entry in reversed(runs):
+                if isinstance(entry, dict):
+                    return entry
+
+        return loaded
+
+    if isinstance(loaded, list):
+        for entry in reversed(loaded):
+            if isinstance(entry, dict):
+                return entry
+
+    raise ValueError(f"unsupported summary JSON shape in {summary_path}")
 
 
 def normalize_relative_path(rel_path: str) -> Path:
@@ -99,7 +128,13 @@ def top_level_root(rel_path: Path) -> str | None:
     return parts[0]
 
 
-def move_directory(source: Path, destination: Path, dry_run: bool, force: bool) -> tuple[bool, str | None]:
+def transfer_directory(
+    source: Path,
+    destination: Path,
+    mode: str,
+    dry_run: bool,
+    force: bool,
+) -> tuple[bool, str | None]:
     if not source.exists():
         return False, f"source not found: {source}"
     if not source.is_dir():
@@ -114,7 +149,10 @@ def move_directory(source: Path, destination: Path, dry_run: bool, force: bool) 
         return True, None
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(source), str(destination))
+    if mode == "copy":
+        shutil.copytree(source, destination)
+    else:
+        shutil.move(str(source), str(destination))
     return True, None
 
 
@@ -179,6 +217,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[INFO] Clean directory: {clean_dir}")
     print(f"[INFO] Summary JSON: {summary_path}")
     print(f"[INFO] Roots: {', '.join(args.roots)}")
+    print(f"[INFO] Mode: {args.mode}")
 
     if not summary_path.exists():
         print(f"[ERROR] Summary JSON not found: {summary_path}")
@@ -186,7 +225,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         summary = load_summary(summary_path)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"[ERROR] Failed to read summary JSON: {exc}")
         return 2
 
@@ -212,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
 
         status = source_status(source, destination)
         if status == "destination":
-            print(f"[SKIP] Already moved: {rel_dir.as_posix()}")
+            print(f"[SKIP] Already {args.mode}d: {rel_dir.as_posix()}")
             moved += 1
             continue
         if status == "missing":
@@ -220,21 +259,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[FAIL] {rel_dir.as_posix()}: source and destination both missing")
             continue
 
-        ok, message = move_directory(source, destination, args.dry_run, args.force)
+        ok, message = transfer_directory(source, destination, args.mode, args.dry_run, args.force)
         if ok:
             moved += 1
-            print(f"[MOVED] {rel_dir.as_posix()}")
+            print(f"[{args.mode.upper()}D] {rel_dir.as_posix()}")
         else:
             failed += 1
             print(f"[FAIL] {rel_dir.as_posix()}: {message}")
 
     pruned = 0
-    for root_name in sorted(touched_roots):
-        root_dir = base_dir / root_name
-        pruned += prune_empty_directories(root_dir, args.dry_run)
+    if args.mode == "move":
+        for root_name in sorted(touched_roots):
+            root_dir = base_dir / root_name
+            pruned += prune_empty_directories(root_dir, args.dry_run)
 
     print("\n[SUMMARY]")
-    print(f"  Moved: {moved}")
+    print(f"  {args.mode.title()}d: {moved}")
     print(f"  Skipped by root filter: {skipped}")
     print(f"  Failed: {failed}")
     print(f"  Empty directories removed: {pruned}")

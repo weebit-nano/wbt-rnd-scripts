@@ -59,6 +59,11 @@ IMPORT_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 
+EXPECTED_JSON_OUTPUT_NAMES = (
+    "SchedulerJSON_000.json",
+    "ScriptJSON_000.json",
+)
+
 
 @dataclass
 class MatchResult:
@@ -363,9 +368,135 @@ def append_run_log(log_path: Path, content: str) -> tuple[bool, str | None]:
     return True, None
 
 
-def write_run_log_json(log_path: Path, payload: dict[str, object]) -> tuple[bool, str | None]:
+def record_run_log(log_path: Path, content: str) -> tuple[bool, str | None]:
+    if not log_path.exists():
+        return write_run_log(log_path, content)
+
+    separator = ""
     try:
-        log_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        if log_path.stat().st_size > 0:
+            separator = "\n" + ("=" * 80) + "\n"
+    except OSError as exc:
+        return False, f"failed inspecting existing log file: {exc}"
+
+    return append_run_log(log_path, separator + content)
+
+
+def load_run_log_history(log_path: Path) -> tuple[list[dict[str, object]], str | None]:
+    if not log_path.exists():
+        return [], None
+
+    try:
+        existing = json.loads(log_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [], f"failed reading existing JSON run log: {exc}"
+
+    if isinstance(existing, dict):
+        runs = existing.get("runs")
+        if isinstance(runs, list):
+            history = [entry for entry in runs if isinstance(entry, dict)]
+            if history:
+                return history, None
+
+        latest = existing.get("latest")
+        if isinstance(latest, dict):
+            return [latest], None
+
+        return [existing], None
+
+    if isinstance(existing, list):
+        history = [entry for entry in existing if isinstance(entry, dict)]
+        return history, None
+
+    return [], "existing JSON run log has unsupported shape"
+
+
+def extract_parent_dir_entries(payload: dict[str, object], key: str) -> list[str]:
+    selected = payload.get("selected_parent_dirs")
+    if not isinstance(selected, dict):
+        return []
+
+    entries = selected.get(key)
+    if not isinstance(entries, list):
+        return []
+
+    parent_dirs: list[str] = []
+    for entry in entries:
+        if isinstance(entry, str):
+            parent_dirs.append(entry)
+        elif isinstance(entry, dict):
+            parent_dir = entry.get("parent_dir")
+            if isinstance(parent_dir, str):
+                parent_dirs.append(parent_dir)
+    return parent_dirs
+
+
+def int_or_default(value: object, default: int = 0) -> int:
+    return value if isinstance(value, int) else default
+
+
+def build_combined_run_log_payload(
+    history: list[dict[str, object]],
+    latest_payload: dict[str, object],
+) -> dict[str, object]:
+    ok_parent_dirs: list[str] = []
+    failed_parent_dirs: list[str] = []
+    selected_count = 0
+    completed_count = 0
+    converted_count = 0
+    failed_count = 0
+
+    for entry in history:
+        ok_parent_dirs.extend(extract_parent_dir_entries(entry, "OK"))
+        failed_parent_dirs.extend(extract_parent_dir_entries(entry, "FAILED"))
+        selected_count += int_or_default(entry.get("selected_count"))
+        completed_count += int_or_default(entry.get("completed_count"))
+        converted_count += int_or_default(entry.get("converted_count"))
+        failed_count += int_or_default(entry.get("failed_count"))
+
+    return {
+        "run_id": latest_payload.get("run_id"),
+        "timestamp": latest_payload.get("timestamp"),
+        "status": latest_payload.get("status"),
+        "base_dir": latest_payload.get("base_dir"),
+        "run_count": len(history),
+        "selected_count": selected_count,
+        "completed_count": completed_count,
+        "converted_count": converted_count,
+        "failed_count": failed_count,
+        "selected_counts": {
+            "ok_parent_dirs": len(ok_parent_dirs),
+            "failed_parent_dirs": len(failed_parent_dirs),
+        },
+        "selected_parent_dirs": {
+            "OK": ok_parent_dirs,
+            "FAILED": failed_parent_dirs,
+        },
+        "runs": history,
+    }
+
+
+def upsert_run_log_json(log_path: Path, payload: dict[str, object]) -> tuple[bool, str | None]:
+    history, load_error = load_run_log_history(log_path)
+    if load_error:
+        return False, load_error
+
+    run_id = payload.get("run_id")
+    replaced = False
+    if isinstance(run_id, str):
+        for index, entry in enumerate(history):
+            if entry.get("run_id") == run_id:
+                history[index] = payload
+                replaced = True
+                break
+
+    if not replaced:
+        history.append(payload)
+
+    document = build_combined_run_log_payload(history, payload)
+
+    try:
+        log_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
     except OSError as exc:
         return False, f"failed writing JSON run log: {exc}"
     return True, None
@@ -411,17 +542,21 @@ def check_directory_write_access(directory: Path) -> tuple[bool, str | None]:
 def verify_json_outputs(ttk_path: Path, json_before: set[Path]) -> tuple[bool, list[Path], str | None]:
     directory = ttk_path.parent
     json_after = list_json_files(directory)
-    created_json = sorted(json_after - json_before)
+    required_json = {directory / name for name in EXPECTED_JSON_OUTPUT_NAMES}
+    created_json = sorted((json_after - json_before) & required_json)
+    missing_json = sorted(required_json - json_after)
 
-    if len(created_json) == 2:
+    if not missing_json:
         return True, created_json, None
 
     before_names = ", ".join(sorted(path.name for path in json_before)) or "none"
     after_names = ", ".join(sorted(path.name for path in json_after)) or "none"
     created_names = ", ".join(path.name for path in created_json) or "none"
+    missing_names = ", ".join(path.name for path in missing_json)
     error = (
-        f"expected 2 new .json files in {directory}, but found {len(created_json)}. "
-        f"Created: {created_names}. Pre-run .json files: {before_names}. Current .json files: {after_names}."
+        f"missing required JSON outputs in {directory}: {missing_names}. "
+        f"Newly created required files: {created_names}. Pre-run .json files: {before_names}. "
+        f"Current .json files: {after_names}."
     )
     return False, created_json, error
 
@@ -545,7 +680,7 @@ def process_selected_file(base_dir: Path, args: argparse.Namespace, ttk_path: Pa
     log_content.append("[STDERR]")
     log_content.append(err.rstrip() if err.strip() else "<empty>")
     log_content.append("")
-    log_ok, log_error = write_run_log(log_path, "\n".join(log_content).rstrip() + "\n")
+    log_ok, log_error = record_run_log(log_path, "\n".join(log_content).rstrip() + "\n")
     conversion.log_ok = log_ok
     conversion.log_error = log_error
 
@@ -557,7 +692,12 @@ def process_selected_file(base_dir: Path, args: argparse.Namespace, ttk_path: Pa
     if outputs_ok:
         conversion.success = log_ok
         if rc == 0:
-            conversion.messages.append("  [OK] TTK2Json created 2 JSON files")
+            if created_json:
+                conversion.messages.append(
+                    f"  [OK] Required JSON files are present; newly created: {', '.join(path.name for path in created_json)}"
+                )
+            else:
+                conversion.messages.append("  [OK] Required JSON files are present")
         else:
             conversion.messages.append(f"  [WARN] TTK2Json exited with code {rc}, but output check passed")
     else:
@@ -609,6 +749,7 @@ def main(argv: list[str] | None = None) -> int:
         argv = sys.argv[1:]
 
     args = parse_args(argv)
+    run_id = f"{datetime.now().isoformat(timespec='seconds')}-pid{os.getpid()}"
 
     base_dir = args.base_dir.resolve()
     print(f"[INFO] Base directory: {base_dir}")
@@ -646,6 +787,7 @@ def main(argv: list[str] | None = None) -> int:
     def write_summary_log(status: str) -> tuple[bool, str | None, Path]:
         summary_path = base_dir / "run_log.json"
         payload: dict[str, object] = {
+            "run_id": run_id,
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "status": status,
             "base_dir": str(base_dir),
@@ -662,7 +804,7 @@ def main(argv: list[str] | None = None) -> int:
                 "FAILED": failed_parent_dirs,
             },
         }
-        ok, error = write_run_log_json(summary_path, payload)
+        ok, error = upsert_run_log_json(summary_path, payload)
         return ok, error, summary_path
 
     if not selected:

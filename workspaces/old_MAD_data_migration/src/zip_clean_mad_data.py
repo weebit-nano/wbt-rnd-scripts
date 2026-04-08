@@ -1,9 +1,9 @@
-"""Compress clean TTK parent directories into separate zip files.
+"""Compress selected TTK parent directories into separate zip files.
 
-The script scans a source tree such as `CLEAN`, finds unique parent
-directories that contain `.ttk` files, filters them by the same `--roots`
-argument shape used by `ttk2json_batch.py`, and writes one zip archive per
-directory.
+The script can either scan a source tree such as `CLEAN` to find parent
+directories that contain `.ttk` files, or read `run_log.json` from
+`ttk2json_batch.py` and zip the directories listed under
+`selected_parent_dirs.OK` directly from the raw data tree.
 
 Zip file names are derived from the folder hierarchy so each archive is unique
 and easy to map back to its source directory.
@@ -25,8 +25,8 @@ from tqdm import tqdm
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Zip each clean TTK parent directory into a separate archive while "
-            "preserving the folder hierarchy in the archive name."
+            "Zip each selected TTK parent directory into a separate archive "
+            "while preserving the folder hierarchy in the archive name."
         )
     )
     parser.add_argument(
@@ -39,15 +39,29 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--source-dir",
         type=Path,
         default=Path("CLEAN"),
-        help="Directory containing the clean TTK parent folders to zip (default: CLEAN under --base-dir).",
+        help=(
+            "Directory to scan for TTK parent folders when --summary-json is "
+            "not provided (default: CLEAN under --base-dir)."
+        ),
+    )
+    parser.add_argument(
+        "--summary-json",
+        type=Path,
+        default=None,
+        help=(
+            "Path to the JSON run summary produced by ttk2json_batch.py. "
+            "When provided, zip the directories listed under "
+            "selected_parent_dirs.OK directly from --base-dir."
+        ),
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=None,
         help=(
-            "Directory for output zip files (default: a 'CLEAN_zips' folder "
-            "next to the source tree)."
+            "Directory for output zip files (default: 'CLEAN_zips' next to "
+            "the source tree, or 'run_log_ok_zips' under --base-dir when "
+            "--summary-json is provided)."
         ),
     )
     parser.add_argument(
@@ -77,6 +91,55 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def normalize_path(path_text: str) -> Path:
     return Path(path_text.replace("/", "\\"))
+
+
+def load_summary(summary_path: Path) -> dict[str, object]:
+    with summary_path.open("r", encoding="utf-8") as summary_file:
+        loaded = json.load(summary_file)
+
+    if isinstance(loaded, dict):
+        if isinstance(loaded.get("selected_parent_dirs"), dict):
+            return loaded
+
+        latest = loaded.get("latest")
+        if isinstance(latest, dict):
+            return latest
+
+        runs = loaded.get("runs")
+        if isinstance(runs, list):
+            for entry in reversed(runs):
+                if isinstance(entry, dict):
+                    return entry
+
+        return loaded
+
+    if isinstance(loaded, list):
+        for entry in reversed(loaded):
+            if isinstance(entry, dict):
+                return entry
+
+    raise ValueError(f"unsupported summary JSON shape in {summary_path}")
+
+
+def selected_ok_dirs(summary: dict[str, object]) -> list[str]:
+    selected = summary.get("selected_parent_dirs", {})
+    if not isinstance(selected, dict):
+        return []
+
+    ok_entries = selected.get("OK", [])
+    if not isinstance(ok_entries, list):
+        return []
+
+    parent_dirs: list[str] = []
+    for entry in ok_entries:
+        if isinstance(entry, str):
+            parent_dirs.append(entry)
+        elif isinstance(entry, dict):
+            parent_dir = entry.get("parent_dir")
+            if isinstance(parent_dir, str):
+                parent_dirs.append(parent_dir)
+
+    return parent_dirs
 
 
 def relative_root(rel_path: Path) -> str | None:
@@ -109,6 +172,25 @@ def collect_ttk_parent_directories(source_dir: Path, roots: list[str]) -> list[P
             parents.append(parent_dir)
 
     return sorted(parents, key=lambda path: path.as_posix())
+
+
+def collect_summary_parent_directories(base_dir: Path, roots: list[str], summary_path: Path) -> list[Path]:
+    summary = load_summary(summary_path)
+    root_filter = set(roots)
+    parents: list[Path] = []
+    seen: set[Path] = set()
+
+    for rel_dir_text in selected_ok_dirs(summary):
+        rel_dir = normalize_path(rel_dir_text)
+        if root_filter and relative_root(rel_dir) not in root_filter:
+            continue
+
+        directory = base_dir / rel_dir
+        if directory not in seen:
+            seen.add(directory)
+            parents.append(directory)
+
+    return sorted(parents, key=lambda path: path.relative_to(base_dir).as_posix())
 
 
 def archive_name_for_directory(source_dir: Path, directory: Path) -> str:
@@ -154,26 +236,51 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
     base_dir = args.base_dir.resolve()
+    summary_path = None
+    if args.summary_json is not None:
+        summary_path = (base_dir / args.summary_json).resolve() if not args.summary_json.is_absolute() else args.summary_json.resolve()
+
     source_dir = (base_dir / args.source_dir).resolve() if not args.source_dir.is_absolute() else args.source_dir.resolve()
-    output_dir = (
-        (base_dir / args.output_dir).resolve()
-        if args.output_dir is not None and not args.output_dir.is_absolute()
-        else (args.output_dir.resolve() if args.output_dir is not None else (source_dir.parent / f"{source_dir.name}_zips").resolve())
-    )
+    if args.output_dir is None:
+        if summary_path is not None:
+            output_dir = (base_dir / "run_log_ok_zips").resolve()
+        else:
+            output_dir = (source_dir.parent / f"{source_dir.name}_zips").resolve()
+    elif args.output_dir.is_absolute():
+        output_dir = args.output_dir.resolve()
+    else:
+        output_dir = (base_dir / args.output_dir).resolve()
 
     tqdm.write(f"[INFO] Base directory: {base_dir}")
-    tqdm.write(f"[INFO] Source directory: {source_dir}")
     tqdm.write(f"[INFO] Output directory: {output_dir}")
     tqdm.write(f"[INFO] Roots: {', '.join(args.roots)}")
+    if summary_path is not None:
+        tqdm.write(f"[INFO] Summary JSON: {summary_path}")
+    else:
+        tqdm.write(f"[INFO] Source directory: {source_dir}")
 
-    if not source_dir.exists():
-        tqdm.write(f"[ERROR] Source directory not found: {source_dir}")
-        return 2
+    if summary_path is not None:
+        if not summary_path.exists():
+            tqdm.write(f"[ERROR] Summary JSON not found: {summary_path}")
+            return 2
 
-    parent_dirs = collect_ttk_parent_directories(source_dir, args.roots)
+        try:
+            parent_dirs = collect_summary_parent_directories(base_dir, args.roots, summary_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            tqdm.write(f"[ERROR] Failed to read summary JSON: {exc}")
+            return 2
+    else:
+        if not source_dir.exists():
+            tqdm.write(f"[ERROR] Source directory not found: {source_dir}")
+            return 2
+
+        parent_dirs = collect_ttk_parent_directories(source_dir, args.roots)
+
     if not parent_dirs:
         tqdm.write("[INFO] No TTK parent directories found.")
         return 0
+
+    archive_root = base_dir if summary_path is not None else source_dir
 
     zipped = 0
     skipped = 0
@@ -183,13 +290,13 @@ def main(argv: list[str] | None = None) -> int:
     tqdm.write(f"[INFO] Workers: {worker_count}")
 
     tasks = [
-        (directory, output_dir / archive_name_for_directory(source_dir, directory))
+        (directory, output_dir / archive_name_for_directory(archive_root, directory))
         for directory in parent_dirs
     ]
 
     with ProcessPoolExecutor(max_workers=worker_count) as executor:
         future_map = {
-            executor.submit(zip_directory_task, source_dir, directory, zip_path, args.dry_run, args.overwrite): (directory, zip_path)
+            executor.submit(zip_directory_task, archive_root, directory, zip_path, args.dry_run, args.overwrite): (directory, zip_path)
             for directory, zip_path in tasks
         }
 
@@ -211,6 +318,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = {
         "base_dir": str(base_dir),
         "source_dir": str(source_dir),
+        "summary_json": str(summary_path) if summary_path is not None else None,
         "output_dir": str(output_dir),
         "roots": args.roots,
         "zipped": zipped,
